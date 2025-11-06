@@ -17,10 +17,20 @@
         import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection, query, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Configuração do Firebase ---
-        // Variáveis globais (serão injetadas pelo ambiente)
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEFAULT_API_KEY", authDomain: "DEFAULT_AUTH_DOMAIN", projectId: "DEFAULT_PROJECT_ID" };
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Configuração copiada do console do Firebase
+        const firebaseConfig = {
+          apiKey: "AIzaSyBSRrJdyt5eBH9vyYYMEtMcga1FiAx4Qps",
+          authDomain: "calculadora-valmir.firebaseapp.com",
+          projectId: "calculadora-valmir",
+          storageBucket: "calculadora-valmir.firebasestorage.app",
+          messagingSenderId: "867449556215",
+          appId: "1:867449556215:web:53955e4d9fff5fd1b917f2",
+          measurementId: "G-RDDV83LGX3"
+        };
+        
+        // A lógica de 'appId' e 'initialAuthToken' foi removida por não ser necessária fora do Gemini
+        const appId = firebaseConfig.projectId; // Usa o ID do seu projeto
 
         // Inicializa Firebase
         const app = initializeApp(firebaseConfig);
@@ -355,13 +365,9 @@
                     // console.log("Usuário autenticado:", userId);
                     setPeriodoAtual(); // Define o período e carrega os dados
                 } else {
-                    // Tenta login com token ou anônimo
+                    // Tenta login anônimo (a única opção agora)
                     try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(auth, initialAuthToken);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
+                        await signInAnonymously(auth);
                         // O listener onAuthStateChanged cuidará de definir o userId e carregar os dados
                     } catch (error) {
                         console.error("Erro na autenticação: ", error);

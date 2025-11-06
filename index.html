@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calculadora de Comissão</title>
+    <!-- Carrega o Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Bibliotecas jsPDF e autoTable removidas -->
+
+    <!-- Carrega o Firebase -->
+    <script type="module">
+        // Importações do Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, deleteDoc, onSnapshot, collection, query, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Configuração do Firebase ---
+        // Variáveis globais (serão injetadas pelo ambiente)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEFAULT_API_KEY", authDomain: "DEFAULT_AUTH_DOMAIN", projectId: "DEFAULT_PROJECT_ID" };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Inicializa Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        // Habilita logs para debug
+        // setLogLevel('debug');
+
+        let userId = null; // ID do usuário
+        let currentPeriod = null; // Período selecionado (ex: "2025-10")
+        let lancamentos = []; // Array local para guardar os lançamentos
+        let unsubscribeLancamentos = null; // Função para parar o listener do Firestore
+
+        // Elementos da UI
+        let periodoInput, formLancamento, tabelaCorpo, totalComissaoEl, exportHtmlBtn, loadingOverlay;
+
+        // --- Funções Auxiliares ---
+
+        // Formata um número para o formato de moeda BRL (R$ 1.234,56)
+        function formatarMoeda(valor) {
+            return new Intl.NumberFormat('pt-BR', {
+                style: 'currency',
+                currency: 'BRL'
+            }).format(valor);
+        }
+
+        // Formata uma data no formato ISO (YYYY-MM-DD) para DD/MM/YYYY
+        function formatarData(dataISO) {
+            if (!dataISO) return '';
+            const [ano, mes, dia] = dataISO.split('-');
+            return `${dia}/${mes}/${ano}`;
+        }
+        
+        // Define o mês atual no input de período
+        function setPeriodoAtual() {
+            const agora = new Date();
+            const ano = agora.getFullYear();
+            const mes = (agora.getMonth() + 1).toString().padStart(2, '0');
+            currentPeriod = `${ano}-${mes}`;
+            periodoInput.value = currentPeriod;
+            carregarLancamentos();
+        }
+
+        // --- Lógica do Firestore ---
+
+        // Carrega lançamentos do Firestore para o período selecionado
+        function carregarLancamentos() {
+            if (!userId || !currentPeriod) return;
+
+            // Para o listener anterior, se existir
+            if (unsubscribeLancamentos) {
+                unsubscribeLancamentos();
+            }
+
+            // Caminho da coleção no Firestore
+            const collectionPath = `artifacts/${appId}/users/${userId}/comissoes/${currentPeriod}/lancamentos`;
+            const lancamentosRef = collection(db, collectionPath);
+            const q = query(lancamentosRef);
+
+            // Inicia o listener em tempo real
+            unsubscribeLancamentos = onSnapshot(q, (querySnapshot) => {
+                lancamentos = [];
+                querySnapshot.forEach((doc) => {
+                    lancamentos.push({ id: doc.id, ...doc.data() });
+                });
+                // Ordena por data de vencimento (a planilha parecia ordenada por NF/Vencto)
+                lancamentos.sort((a, b) => new Date(a.vencto) - new Date(b.vencto));
+                renderizarTabela();
+                calcularTotal();
+            }, (error) => {
+                console.error("Erro ao carregar lançamentos: ", error);
+            });
+        }
+
+        // Adiciona um novo lançamento ao Firestore
+        async function adicionarLancamento(e) {
+            e.preventDefault();
+            if (!userId || !currentPeriod) {
+                console.error("Usuário não autenticado ou período não definido.");
+                return;
+            }
+
+            const formData = new FormData(formLancamento);
+            const baseCalc = parseFloat(formData.get('baseCalc')) || 0;
+            const percentual = parseFloat(formData.get('percentual')) || 0;
+            const valor = (baseCalc * percentual) / 100;
+
+            const novoLancamento = {
+                nf: formData.get('nf'),
+                parc: formData.get('parc'),
+                cliente: formData.get('cliente'),
+                vencto: formData.get('vencto'),
+                baseCalc: baseCalc,
+                percentual: percentual,
+                valor: valor
+            };
+
+            // Validação simples
+            if (!novoLancamento.nf || !novoLancamento.vencto || baseCalc <= 0 || percentual <= 0) {
+                // Poderia exibir um modal de erro aqui
+                console.warn("Por favor, preencha NF, Vencimento, Base de Cálculo e Percentual.");
+                return;
+            }
+            
+            loadingOverlay.classList.remove('hidden');
+
+            try {
+                const collectionPath = `artifacts/${appId}/users/${userId}/comissoes/${currentPeriod}/lancamentos`;
+                await addDoc(collection(db, collectionPath), novoLancamento);
+                formLancamento.reset(); // Limpa o formulário
+            } catch (error) {
+                console.error("Erro ao adicionar lançamento: ", error);
+            } finally {
+                loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        // Exclui um lançamento do Firestore
+        async function excluirLancamento(id) {
+            // Confirmação (substituindo o window.confirm)
+            // Em um app real, usaríamos um modal
+            console.log(`Tentando excluir ${id}. Em um app real, pediríamos confirmação.`);
+            
+            if (!userId || !currentPeriod || !id) return;
+            
+            loadingOverlay.classList.remove('hidden');
+            
+            try {
+                const docPath = `artifacts/${appId}/users/${userId}/comissoes/${currentPeriod}/lancamentos/${id}`;
+                await deleteDoc(doc(db, docPath));
+                // O onSnapshot cuidará de atualizar a UI
+            } catch (error) {
+                console.error("Erro ao excluir lançamento: ", error);
+            } finally {
+                loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        // --- Renderização da UI ---
+
+        // Atualiza a tabela HTML com os dados
+        function renderizarTabela() {
+            tabelaCorpo.innerHTML = ''; // Limpa a tabela
+            if (lancamentos.length === 0) {
+                tabelaCorpo.innerHTML = `<tr><td colspan="8" class="text-center p-4 text-gray-500">Nenhum lançamento para este período.</td></tr>`;
+                return;
+            }
+
+            lancamentos.forEach(item => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-b hover:bg-gray-50';
+                tr.innerHTML = `
+                    <td class="p-3">${item.nf}</td>
+                    <td class="p-3">${item.parc}</td>
+                    <td class="p-3">${item.cliente}</td>
+                    <td class="p-3">${formatarData(item.vencto)}</td>
+                    <td class="p-3 text-right">${formatarMoeda(item.baseCalc)}</td>
+                    <td class="p-3 text-right">${item.percentual.toFixed(2)}%</td>
+                    <td class="p-3 text-right font-medium">${formatarMoeda(item.valor)}</td>
+                    <td class="p-3 text-center">
+                        <button data-id="${item.id}" class="excluir-btn text-red-600 hover:text-red-800 text-sm font-medium">Excluir</button>
+                    </td>
+                `;
+                tabelaCorpo.appendChild(tr);
+            });
+        }
+
+        // Calcula e exibe o total das comissões
+        function calcularTotal() {
+            const total = lancamentos.reduce((acc, item) => acc + item.valor, 0);
+            totalComissaoEl.textContent = formatarMoeda(total);
+        }
+
+        // --- Exportação ---
+
+        function gerarRelatorioHTML() {
+            if (lancamentos.length === 0) {
+                console.warn("Não há dados para gerar relatório.");
+                // Idealmente, mostraria um modal de aviso
+                return;
+            }
+
+            const total = lancamentos.reduce((acc, item) => acc + item.valor, 0);
+            const periodoFormatado = periodoInput.value; // ex: "2025-10"
+
+            // --- Construção da Tabela HTML ---
+            let tabelaHtml = `
+                <table class="tabela-relatorio">
+                    <thead>
+                        <tr>
+                            <th>NF</th>
+                            <th>Parc.</th>
+                            <th>Cliente</th>
+                            <th>Vencimento</th>
+                            <th>Base (R$)</th>
+                            <th>%</th>
+                            <th>Valor (R$)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            lancamentos.forEach(item => {
+                tabelaHtml += `
+                    <tr>
+                        <td>${item.nf}</td>
+                        <td>${item.parc}</td>
+                        <td>${item.cliente}</td>
+                        <td>${formatarData(item.vencto)}</td>
+                        <td class="num">${formatarMoeda(item.baseCalc)}</td>
+                        <td class="num">${item.percentual.toFixed(2)}%</td>
+                        <td class="num strong">${formatarMoeda(item.valor)}</td>
+                    </tr>
+                `;
+            });
+
+            // Linha de Total
+            tabelaHtml += `
+                    <tr class="total-row">
+                        <td colspan="6" class="num strong">TOTAL</td>
+                        <td class="num strong">${formatarMoeda(total)}</td>
+                    </tr>
+                </tbody>
+            </table>
+            `;
+
+            // --- Construção da Página HTML Completa ---
+            const htmlRelatorio = `
+                <html>
+                <head>
+                    <title>Relatório de Comissão - ${periodoFormatado}</title>
+                    <meta charset="UTF-8">
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            margin: 20px;
+                            color: #333;
+                        }
+                        header {
+                            margin-bottom: 20px;
+                            border-bottom: 2px solid #eee;
+                            padding-bottom: 10px;
+                        }
+                        h1 {
+                            font-size: 1.5em;
+                            margin: 0;
+                        }
+                        h2 {
+                            font-size: 1.2em;
+                            margin: 5px 0 0 0;
+                            color: #555;
+                        }
+                        h3 {
+                            font-size: 1.1em;
+                            margin: 5px 0 15px 0;
+                            color: #555;
+                        }
+                        .aviso-impressao {
+                            background-color: #fffbeb;
+                            border: 1px solid #fde68a;
+                            padding: 10px 15px;
+                            border-radius: 5px;
+                            margin-bottom: 20px;
+                        }
+                        .tabela-relatorio {
+                            width: 100%;
+                            border-collapse: collapse;
+                            font-size: 0.9em;
+                        }
+                        .tabela-relatorio th, .tabela-relatorio td {
+                            border: 1px solid #ddd;
+                            padding: 8px;
+                            text-align: left;
+                        }
+                        .tabela-relatorio th {
+                            background-color: #f4f4f4;
+                        }
+                        .tabela-relatorio td.num {
+                            text-align: right;
+                        }
+                        .tabela-relatorio td.strong, .tabela-relatorio tr.total-row td {
+                            font-weight: bold;
+                        }
+                        .tabela-relatorio tr:nth-child(even) {
+                            background-color: #f9f9f9;
+                        }
+                        .tabela-relatorio tr.total-row {
+                            background-color: #f0f0f0;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <header>
+                        <h1>Dica – Deodápolis Ind. e Com. de Alimentos Ltda</h1>
+                        <h2>COMISSÃO PERÍODO: ${periodoFormatado}</h2>
+                        <h3>VENDAS MS - VALMIR GOMES</h3>
+                    </header>
+
+                    <div class="aviso-impressao">
+                        <strong>Dica:</strong> Use <strong>Ctrl+P</strong> (ou <strong>Cmd+P</strong> no Mac) para imprimir esta página ou salvá-la como PDF.
+                    </div>
+                    
+                    ${tabelaHtml}
+                </body>
+                </html>
+            `;
+
+            // --- Abre a nova janela/aba ---
+            const aba = window.open("", "_blank");
+            aba.document.open();
+            aba.document.write(htmlRelatorio);
+            aba.document.close();
+        }
+
+
+        // --- Inicialização ---
+
+        window.onload = () => {
+            // Mapeia elementos da UI
+            periodoInput = document.getElementById('periodoInput');
+            formLancamento = document.getElementById('formLancamento');
+            tabelaCorpo = document.getElementById('tabelaCorpo');
+            totalComissaoEl = document.getElementById('totalComissao');
+            exportHtmlBtn = document.getElementById('exportHtmlBtn'); // Atualizado
+            loadingOverlay = document.getElementById('loadingOverlay');
+ 
+            // --- Autenticação Firebase ---
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    // console.log("Usuário autenticado:", userId);
+                    setPeriodoAtual(); // Define o período e carrega os dados
+                } else {
+                    // Tenta login com token ou anônimo
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                        // O listener onAuthStateChanged cuidará de definir o userId e carregar os dados
+                    } catch (error) {
+                        console.error("Erro na autenticação: ", error);
+                        loadingOverlay.textContent = "Erro de autenticação. Atualize a página.";
+                    }
+                }
+            });
+
+            // --- Event Listeners ---
+
+            // Muda o período
+            periodoInput.addEventListener('change', (e) => {
+                currentPeriod = e.target.value;
+                carregarLancamentos();
+            });
+
+            // Adiciona lançamento
+            formLancamento.addEventListener('submit', adicionarLancamento);
+ 
+            // Exporta HTML
+            exportHtmlBtn.addEventListener('click', gerarRelatorioHTML); // Atualizado
+ 
+            // Delegação de evento para botões de excluir
+            document.getElementById('tabelaLancamentos').addEventListener('click', (e) => {
+                if (e.target && e.target.classList.contains('excluir-btn')) {
+                    const id = e.target.getAttribute('data-id');
+                    excluirLancamento(id);
+                }
+            });
+        };
+
+    </script>
+</head>
+<body class="bg-gray-100 font-sans antialiased">
+
+    <!-- Overlay de Carregamento -->
+    <div id="loadingOverlay" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="text-white text-xl">Carregando...</div>
+    </div>
+
+    <div class="container mx-auto p-4 md:p-8 max-w-6xl">
+        
+        <!-- Cabeçalho -->
+        <header class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h1 class="text-2xl font-bold text-gray-800">Dica – Deodápolis Ind. e Com. de Alimentos Ltda</h1>
+            <h2 class="text-xl text-indigo-600">Cálculo de Comissão - VENDAS MS - VALMIR GOMES</h2>
+        </header>
+
+        <!-- Seção de Período e Resumo -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 flex flex-col md:flex-row justify-between items-center gap-4">
+            <!-- Seleção de Período -->
+            <div class="flex items-center gap-3">
+                <label for="periodoInput" class="text-lg font-medium text-gray-700">Período:</label>
+                <input type="month" id="periodoInput" class="p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+            </div>
+            
+            <!-- Resumo Total -->
+            <div class="text-center md:text-right">
+                <span class="text-lg text-gray-600 block">Comissão Total (Período):</span>
+                <span id="totalComissao" class="text-3xl font-bold text-green-600">R$ 0,00</span>
+            </div>
+        </div>
+
+        <!-- Formulário de Lançamento -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h3 class="text-xl font-semibold mb-4 text-gray-800">Adicionar Novo Lançamento</h3>
+            <form id="formLancamento" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                
+                <div class="md:col-span-1">
+                    <label for="nf" class="block text-sm font-medium text-gray-700">NF (Nota Fiscal)</label>
+                    <input type="text" name="nf" id="nf" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-1">
+                    <label for="parc" class="block text-sm font-medium text-gray-700">Parcela</label>
+                    <input type="text" name="parc" id="parc" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-2 lg:col-span-2">
+                    <label for="cliente" class="block text-sm font-medium text-gray-700">Cliente</label>
+                    <input type="text" name="cliente" id="cliente" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-1">
+                    <label for="vencto" class="block text-sm font-medium text-gray-700">Vencimento</label>
+                    <input type="date" name="vencto" id="vencto" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-1">
+                    <label for="baseCalc" class="block text-sm font-medium text-gray-700">Base de Cálculo (R$)</label>
+                    <input type="number" name="baseCalc" id="baseCalc" step="0.01" min="0" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-1">
+                    <label for="percentual" class="block text-sm font-medium text-gray-700">Percentual (%)</label>
+                    <input type="number" name="percentual" id="percentual" step="0.01" min="0" value="1.0" required class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                
+                <div class="md:col-span-1 flex items-end">
+                    <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        Adicionar
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Tabela de Lançamentos -->
+        <div class="bg-white shadow-md rounded-lg overflow-hidden">
+            <div class="flex justify-between items-center p-4 border-b">
+                 <h3 class="text-xl font-semibold text-gray-800">Lançamentos do Período</h3>
+                 <button id="exportHtmlBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    Gerar Relatório (Imprimir)
+                </button>
+            </div>
+           
+            <div class="overflow-x-auto">
+                <table id="tabelaLancamentos" class="w-full min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th scope="col" class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NF</th>
+                            <th scope="col" class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Parc.</th>
+                            <th scope="col" class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cliente</th>
+                            <th scope="col" class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Vencimento</th>
+                            <th scope="col" class="p-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Base (R$)</th>
+                            <th scope="col" class="p-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">%</th>
+                            <th scope="col" class="p-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Valor (R$)</th>
+                            <th scope="col" class="p-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tabelaCorpo" class="bg-white divide-y divide-gray-200">
+                        <!-- Linhas serão inseridas pelo JavaScript -->
+                        <tr>
+                            <td colspan="8" class="text-center p-4 text-gray-500">Carregando dados...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+</body>
+</html>
